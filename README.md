@@ -4,12 +4,6 @@ A classic Space Invaders clone built with **C++** and **SFML** — featuring ali
 
 ---
 
-## Screenshots
-
-> *(Add your own gameplay screenshots here)*
-
----
-
 ## Features
 
 - 🛸 **55 aliens** across 5 rows with 3 types (different point values & colors)
