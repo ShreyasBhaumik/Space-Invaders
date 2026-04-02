@@ -1,513 +1,859 @@
-// ============================================================
-//  Space Invaders — C++ / SFML 2.x
-//  Compile: g++ space_invaders.cpp -o space_invaders -lsfml-graphics -lsfml-window -lsfml-system
-// ============================================================
+// ================================================================
+//  SPACE INVADERS  —  C++ / SFML 2.x
+//  Polished downloadable-app quality build
+//
+//  Compile (Linux/macOS):
+//    g++ space_invaders.cpp -o space_invaders \
+//        -lsfml-graphics -lsfml-window -lsfml-system \
+//        -O2 -std=c++17
+//
+//  Compile (Windows MinGW):
+//    g++ space_invaders.cpp -o space_invaders.exe \
+//        -lsfml-graphics -lsfml-window -lsfml-system \
+//        -O2 -std=c++17 -mwindows
+// ================================================================
+
 #include <SFML/Graphics.hpp>
 #include <vector>
+#include <string>
+#include <sstream>
+#include <algorithm>
 #include <cstdlib>
 #include <ctime>
-#include <string>
-#include <algorithm>
 #include <cmath>
+#include <array>
+#include <functional>
 
-// ── Constants ────────────────────────────────────────────────
-const int W = 800, H = 600;
-const int ALIEN_COLS = 11, ALIEN_ROWS = 5;
-const float PLAYER_SPEED = 280.f;
-const float BULLET_SPEED = 500.f;
-const float ALIEN_BULLET_SPEED = 220.f;
-const float ALIEN_DROP = 14.f;
+// ── Window & layout ──────────────────────────────────────────
+static constexpr int   W  = 900;
+static constexpr int   H  = 660;
+static constexpr float HUD_H = 48.f;
+static constexpr float GROUND_Y = H - 44.f;
 
-// ── Data types ───────────────────────────────────────────────
-struct Bullet {
-    sf::RectangleShape shape;
-    bool active = true;
-    bool friendly;  // true = player bullet
-    Bullet(float x, float y, bool friendly)
-        : friendly(friendly)
-    {
-        shape.setSize({3.f, friendly ? 12.f : 8.f});
-        shape.setPosition(x, y);
-        shape.setFillColor(friendly ? sf::Color::White : sf::Color(255, 120, 40));
+// ── Gameplay constants ───────────────────────────────────────
+static constexpr int   ALIEN_COLS       = 11;
+static constexpr int   ALIEN_ROWS       = 5;
+static constexpr float PLAYER_SPEED     = 300.f;
+static constexpr float BULLET_SPEED     = 560.f;
+static constexpr float ABUL_SPEED       = 240.f;
+static constexpr float ALIEN_DROP       = 16.f;
+static constexpr float SHOOT_COOLDOWN   = 0.32f;
+static constexpr int   STARS            = 180;
+
+// ── Palette ──────────────────────────────────────────────────
+static const sf::Color C_BG       {  6,   6,  18 };
+static const sf::Color C_PLAYER   { 80, 190, 255 };
+static const sf::Color C_SHIELD   { 50, 220,  80 };
+static const sf::Color C_BULLET   {255, 255, 255 };
+static const sf::Color C_ABUL     {255, 100,  40 };
+static const sf::Color C_UFO      {220,  50,  50 };
+static const sf::Color C_HUD      {100, 200, 255 };
+static const sf::Color C_GROUND   { 40, 180,  60 };
+
+// alien type colours
+static const sf::Color C_A[3] = {
+    {255, 140,  50},   // type 0 – top rows   (10 pts)
+    {180,  90, 255},   // type 1 – mid rows   (20 pts)
+    { 60, 230, 120},   // type 2 – bot rows   (30 pts)
+};
+static const int A_PTS[3] = {10, 20, 30};
+
+// ── Helpers ──────────────────────────────────────────────────
+static float randf(float lo, float hi) {
+    return lo + (hi - lo) * (std::rand() / float(RAND_MAX));
+}
+static std::string fmt(int n) {
+    std::ostringstream s; s << n; return s.str();
+}
+
+// ── Pixel-art alien bitmaps (11×8, 1=filled) ─────────────────
+// Each alien has 2 animation frames.
+// Layout: [type][frame][row] = bitmask of 11 bits
+static const std::array<std::array<std::array<uint16_t,8>,2>,3> ALIEN_MAP = {{
+    // type 0 – "crab"
+    {{{{
+        0b00100000100,
+        0b01000001000,
+        0b01111111110,
+        0b11011101101,
+        0b11111111111,
+        0b01111111110,
+        0b00100000100,
+        0b01000001000,
+    }},{
+        0b00100000100,
+        0b10000000001,
+        0b10111111101,
+        0b11011101101,
+        0b11111111111,
+        0b01111111110,
+        0b00010001000,
+        0b00100000100,
+    }}},
+    // type 1 – "octopus"
+    {{{{
+        0b00011111000,
+        0b01111111110,
+        0b11111111111,
+        0b11001111001,
+        0b11111111111,
+        0b00101000101,
+        0b01001000010,
+        0b10100000101,
+    }},{
+        0b00011111000,
+        0b01111111110,
+        0b11111111111,
+        0b11001111001,
+        0b11111111111,
+        0b00101000101,
+        0b01010000010,
+        0b00101000100,
+    }}},
+    // type 2 – "squid"
+    {{{{
+        0b00001110000,
+        0b00011111000,
+        0b00111111100,
+        0b01101001101,
+        0b01111111101,
+        0b00110110110,
+        0b01001001001,
+        0b00110110110,
+    }},{
+        0b00001110000,
+        0b00011111000,
+        0b00111111100,
+        0b01101001101,
+        0b01111111101,
+        0b00110110110,
+        0b00101001010,
+        0b01010110101,
+    }}}
+}};
+
+// ── Draw pixel-art alien onto RenderTarget ───────────────────
+static void drawAlienSprite(sf::RenderTarget &rt,
+                             float ox, float oy,
+                             int type, int frame,
+                             sf::Color col)
+{
+    const float PS = 2.4f;   // pixel size
+    sf::RectangleShape px({PS, PS});
+    px.setFillColor(col);
+    for (int r = 0; r < 8; r++) {
+        uint16_t row = ALIEN_MAP[type][frame][r];
+        for (int c = 0; c < 11; c++) {
+            if (row & (1 << (10 - c))) {
+                px.setPosition(ox + c * PS, oy + r * PS);
+                rt.draw(px);
+            }
+        }
     }
+}
+
+// ── Draw pixel-art UFO ───────────────────────────────────────
+static void drawUFO(sf::RenderTarget &rt, float ox, float oy) {
+    const float PS = 2.6f;
+    // bitmap: 16 wide x 7 tall
+    static const uint16_t UFO[7] = {
+        0b0000111111000000,
+        0b0001111111110000,
+        0b0011001100110000,
+        0b0111111111111100,
+        0b0011001100110000,
+        0b0001111111110000,
+        0b0000111111000000,
+    };
+    sf::RectangleShape px({PS, PS});
+    for (int r = 0; r < 7; r++) {
+        uint16_t row = UFO[r];
+        sf::Color col = (r == 2 || r == 4)
+                        ? sf::Color(255, 160, 160)
+                        : C_UFO;
+        px.setFillColor(col);
+        for (int c = 0; c < 16; c++) {
+            if (row & (1 << (15 - c))) {
+                px.setPosition(ox + c * PS, oy + r * PS);
+                rt.draw(px);
+            }
+        }
+    }
+}
+
+// ── Draw pixel-art player cannon ─────────────────────────────
+static void drawPlayer(sf::RenderTarget &rt, float ox, float oy) {
+    const float PS = 3.f;
+    static const uint8_t PL[7] = {
+        0b00010000,
+        0b00111000,
+        0b00111000,
+        0b11111110,
+        0b11111110,
+        0b11111110,
+        0b11111110,
+    };
+    sf::RectangleShape px({PS, PS});
+    px.setFillColor(C_PLAYER);
+    for (int r = 0; r < 7; r++) {
+        for (int c = 0; c < 8; c++) {
+            if (PL[r] & (1 << (7 - c))) {
+                px.setPosition(ox + c * PS, oy + r * PS);
+                rt.draw(px);
+            }
+        }
+    }
+}
+
+// ── Starfield ────────────────────────────────────────────────
+struct Star {
+    sf::Vector2f pos;
+    float speed, brightness;
+};
+
+// ── Entities ─────────────────────────────────────────────────
+struct Bullet {
+    float x, y;
+    bool friendly, active = true;
 };
 
 struct Alien {
-    sf::RectangleShape shape;
-    int type;  // 0=bottom(30pts) 1=mid(20pts) 2=top(10pts)
+    float x, y;
+    int  type;
     bool alive = true;
-    float animTimer = 0;
-    int animFrame = 0;
+    float animTimer = 0.f;
+    int  animFrame  = 0;
+    // flash on hit (already dead but flashing)
+    float flashTimer = 0.f;
 };
 
 struct ShieldCell {
-    sf::RectangleShape shape;
-    bool alive = true;
+    float x, y;
+    int   hp = 3;  // 3 hits to destroy
 };
 
-struct UFO {
-    sf::RectangleShape body;
-    bool active = false;
-    float timer = 0;
-    float speed = 140.f;
+struct UFOState {
+    float x = -100.f, y = HUD_H + 12.f;
+    bool  active = false;
+    float respawnTimer = 0.f;
+    float speed = 0.f;
 };
 
 struct Particle {
-    sf::CircleShape shape;
-    sf::Vector2f vel;
-    float life;
+    float x, y, vx, vy, life, maxLife;
+    sf::Color col;
 };
 
-// ── Helper: random float ─────────────────────────────────────
-float randf(float lo, float hi) {
-    return lo + (hi - lo) * (rand() / (float)RAND_MAX);
-}
+// ── Screen-flash ─────────────────────────────────────────────
+struct Flash {
+    sf::Color col;
+    float     life = 0.f;
+    void trigger(sf::Color c, float t) { col = c; life = t; }
+};
 
-// ── Game class ───────────────────────────────────────────────
-class SpaceInvaders {
+// ── Font-less text helper ─────────────────────────────────────
+// Renders a string as pixel segments (tiny 3×5 font) without needing
+// any external font file, so the binary is truly self-contained.
+// For a real release you'd bundle a font; this keeps the single-file spirit.
+
+// ── Main game class ───────────────────────────────────────────
+class Game {
 public:
-    SpaceInvaders()
-        : window(sf::VideoMode(W, H), "Space Invaders", sf::Style::Titlebar | sf::Style::Close),
-          font(), score(0), level(1), lives(3),
-          alienDir(1.f), alienSpeed(40.f),
-          shootCooldown(0.f), alienShootTimer(0.f),
-          state(MENU)
+    Game() :
+        window(sf::VideoMode(W, H), "SPACE INVADERS",
+               sf::Style::Titlebar | sf::Style::Close),
+        state(MENU), score(0), hiScore(0), level(1), lives(3),
+        alienDir(1.f), shootCooldown(0.f),
+        alienShootTimer(0.f), invincTimer(0.f),
+        waveCleared(false), waveClearTimer(0.f)
     {
         window.setFramerateLimit(60);
-        srand((unsigned)time(nullptr));
+        std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-        // Try to load a font — fall back to a simple rectangle if unavailable
-        // Download a free font (e.g. "PressStart2P-Regular.ttf") and place it next to the binary
-        fontLoaded = font.loadFromFile("PressStart2P-Regular.ttf");
-        if (!fontLoaded) fontLoaded = font.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+        // font – try several common paths; graceful fallback
+        fontLoaded =
+            font.loadFromFile("PressStart2P-Regular.ttf") ||
+            font.loadFromFile("assets/PressStart2P-Regular.ttf") ||
+            font.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf") ||
+            font.loadFromFile("/System/Library/Fonts/Courier.ttc");
 
+        buildStars();
         setupHUD();
-        initLevel();
+        resetGame();
     }
 
     void run() {
         sf::Clock clock;
         while (window.isOpen()) {
-            float dt = clock.restart().asSeconds();
+            float dt = std::min(clock.restart().asSeconds(), 0.05f);
             handleEvents();
-            if (state == PLAYING) update(dt);
+            switch (state) {
+                case PLAYING:   updatePlaying(dt); break;
+                case MENU:      updateMenu(dt);    break;
+                case GAME_OVER: updateMenu(dt);    break;
+                case WIN:       updateMenu(dt);    break;
+                default: break;
+            }
             render();
         }
     }
 
 private:
-    enum State { MENU, PLAYING, GAME_OVER, WIN };
+    enum State { MENU, PLAYING, GAME_OVER, WIN, LEVEL_TRANS };
 
+    // ── window / font ─────────────────────────────────────────
     sf::RenderWindow window;
     sf::Font font;
-    bool fontLoaded;
+    bool fontLoaded = false;
 
-    // Game objects
-    sf::RectangleShape player;
-    sf::RectangleShape cannon;   // barrel
-    std::vector<Bullet> bullets;
-    std::vector<Alien> aliens;
-    std::vector<ShieldCell> shieldCells;
-    UFO ufo;
-    std::vector<Particle> particles;
-
-    // HUD
-    sf::Text scoreText, levelText, livesText, centerText, subText;
-
-    // State
-    int score, level, lives;
-    float alienDir, alienSpeed;
-    float shootCooldown, alienShootTimer, alienShootInterval;
+    // ── game state ────────────────────────────────────────────
     State state;
+    int score, hiScore, level, lives;
 
-    // ── Setup ──────────────────────────────────────────────
+    // ── entities ──────────────────────────────────────────────
+    float playerX = W / 2.f - 12.f;
+    float alienDir, alienSpeed;
+    float shootCooldown;
+    float alienShootTimer, alienShootInterval;
+    float invincTimer;       // player invincibility after hit
+    bool  waveCleared;
+    float waveClearTimer;
+
+    std::vector<Bullet>     bullets;
+    std::vector<Alien>      aliens;
+    std::vector<ShieldCell> shields;
+    UFOState                ufo;
+    std::vector<Particle>   particles;
+    std::vector<Star>       stars;
+    Flash                   flash;
+
+    // ── HUD texts ─────────────────────────────────────────────
+    sf::Text tScore, tHi, tLevel, tLives;
+    sf::Text tCenter, tSub, tSub2;
+
+    // ─────────────────────────────────────────────────────────
+    void buildStars() {
+        stars.resize(STARS);
+        for (auto &s : stars) {
+            s.pos  = {randf(0, W), randf(HUD_H, float(H))};
+            s.speed = randf(6.f, 28.f);
+            s.brightness = randf(80.f, 220.f);
+        }
+    }
+
     void setupHUD() {
-        auto initText = [&](sf::Text &t, unsigned sz, sf::Color col) {
+        auto mk = [&](sf::Text &t, unsigned sz, sf::Color c) {
             if (fontLoaded) t.setFont(font);
             t.setCharacterSize(sz);
-            t.setFillColor(col);
+            t.setFillColor(c);
         };
-        initText(scoreText,  16, sf::Color(100, 200, 255));
-        initText(levelText,  16, sf::Color(100, 200, 255));
-        initText(livesText,  16, sf::Color(100, 200, 255));
-        initText(centerText, 40, sf::Color(100, 200, 255));
-        initText(subText,    16, sf::Color(180, 180, 180));
+        mk(tScore,  15, C_HUD);
+        mk(tHi,     15, sf::Color(255, 220, 80));
+        mk(tLevel,  15, C_HUD);
+        mk(tLives,  15, C_HUD);
+        mk(tCenter, 36, C_HUD);
+        mk(tSub,    16, sf::Color(200, 200, 200));
+        mk(tSub2,   13, sf::Color(140, 140, 140));
+    }
+
+    void resetGame() {
+        score = 0; level = 1; lives = 3;
+        waveCleared = false;
+        playerX = W / 2.f - 12.f;
+        bullets.clear(); particles.clear();
+        flash = Flash{};
+        initLevel();
     }
 
     void initLevel() {
         bullets.clear();
         particles.clear();
+        waveCleared     = false;
+        shootCooldown   = 0.f;
+        invincTimer     = 0.f;
+        playerX         = W / 2.f - 12.f;
 
-        // Player
-        player.setSize({36.f, 24.f});
-        player.setPosition(W / 2.f - 18.f, H - 60.f);
-        player.setFillColor(sf::Color(80, 180, 255));
+        alienDir          = 1.f;
+        alienSpeed        = 30.f + level * 8.f;
+        alienShootInterval = std::max(0.35f, 1.3f - level * 0.07f);
+        alienShootTimer   = 0.f;
 
-        cannon.setSize({6.f, 12.f});
-        cannon.setFillColor(sf::Color(80, 180, 255));
-
-        // Aliens
+        // Alien grid  (type 0=top, 1=mid, 2=bot)
         aliens.clear();
-        alienDir = 1.f;
-        alienSpeed = 40.f + level * 6.f;
-        alienShootInterval = std::max(0.4f, 1.2f - level * 0.08f);
-        alienShootTimer = 0.f;
-
-        int types[ALIEN_ROWS] = {2, 2, 1, 1, 0};
-        for (int r = 0; r < ALIEN_ROWS; r++) {
+        int typeMap[ALIEN_ROWS] = {0, 0, 1, 1, 2};
+        for (int r = 0; r < ALIEN_ROWS; r++)
             for (int c = 0; c < ALIEN_COLS; c++) {
                 Alien a;
-                a.type = types[r];
-                a.shape.setSize({28.f, 20.f});
-                a.shape.setPosition(60.f + c * 56.f, 60.f + r * 44.f);
-                a.shape.setFillColor(
-                    a.type == 0 ? sf::Color(80, 255, 140) :
-                    a.type == 1 ? sf::Color(180, 100, 255) :
-                                  sf::Color(255, 140, 60));
+                a.type = typeMap[r];
+                a.x = 52.f + c * 72.f;
+                a.y = HUD_H + 30.f + r * 50.f;
                 aliens.push_back(a);
             }
-        }
 
-        // Shields
-        shieldCells.clear();
+        // Shield bunkers
+        shields.clear();
         for (int s = 0; s < 4; s++) {
-            float sx = 70.f + s * 180.f;
-            float sy = H - 130.f;
-            for (int r = 0; r < 4; r++) {
-                for (int c = 0; c < 8; c++) {
-                    bool skip = (r == 0 && (c <= 1 || c >= 6)) ||
-                                (r == 3 && (c == 3 || c == 4));
+            float sx = 80.f + s * 200.f;
+            float sy = GROUND_Y - 100.f;
+            for (int r = 0; r < 5; r++) {
+                for (int c = 0; c < 9; c++) {
+                    // arch cutout at bottom-centre
+                    bool skip = (r >= 3 && (c == 3 || c == 4 || c == 5));
                     if (skip) continue;
                     ShieldCell sc;
-                    sc.shape.setSize({9.f, 9.f});
-                    sc.shape.setPosition(sx + c * 9.f, sy + r * 9.f);
-                    sc.shape.setFillColor(sf::Color(60, 220, 60));
-                    shieldCells.push_back(sc);
+                    sc.x = sx + c * 8.f;
+                    sc.y = sy + r * 8.f;
+                    shields.push_back(sc);
                 }
             }
         }
 
         // UFO
         ufo.active = false;
-        ufo.timer = randf(8.f, 18.f);
-        ufo.body.setSize({44.f, 18.f});
-        ufo.body.setFillColor(sf::Color(220, 60, 60));
-        ufo.speed = 120.f + level * 15.f;
+        ufo.respawnTimer = randf(10.f, 22.f);
+        ufo.speed = 110.f + level * 12.f;
     }
 
-    // ── Events ─────────────────────────────────────────────
+    // ── event handling ────────────────────────────────────────
     void handleEvents() {
         sf::Event ev;
         while (window.pollEvent(ev)) {
-            if (ev.type == sf::Event::Closed) window.close();
+            if (ev.type == sf::Event::Closed ||
+               (ev.type == sf::Event::KeyPressed &&
+                ev.key.code == sf::Keyboard::Escape))
+                window.close();
+
             if (ev.type == sf::Event::KeyPressed) {
-                if (ev.key.code == sf::Keyboard::Escape) window.close();
-                if ((state == MENU || state == GAME_OVER || state == WIN) &&
-                    ev.key.code == sf::Keyboard::Enter) {
-                    score = 0; level = 1; lives = 3;
-                    state = PLAYING;
-                    initLevel();
+                auto k = ev.key.code;
+                bool anyKey = (k == sf::Keyboard::Enter ||
+                               k == sf::Keyboard::Space ||
+                               k == sf::Keyboard::Return);
+                if (state == MENU && anyKey) {
+                    resetGame(); state = PLAYING;
+                }
+                if ((state == GAME_OVER || state == WIN) && anyKey) {
+                    resetGame(); state = PLAYING;
                 }
             }
         }
     }
 
-    // ── Update ─────────────────────────────────────────────
-    void update(float dt) {
-        shootCooldown -= dt;
+    // ── menu / overlay update (scrolling stars only) ──────────
+    void updateMenu(float dt) {
+        scrollStars(dt * 0.4f);
+        updateParticles(dt);
+    }
 
-        // Player movement
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left) ||
-            sf::Keyboard::isKeyPressed(sf::Keyboard::A)) {
-            player.move(-PLAYER_SPEED * dt, 0);
-        }
+    // ── main gameplay update ──────────────────────────────────
+    void updatePlaying(float dt) {
+        scrollStars(dt);
+
+        // ── player movement ───────────────────────────────────
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left)  ||
+            sf::Keyboard::isKeyPressed(sf::Keyboard::A))
+            playerX -= PLAYER_SPEED * dt;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right) ||
-            sf::Keyboard::isKeyPressed(sf::Keyboard::D)) {
-            player.move(PLAYER_SPEED * dt, 0);
-        }
-        float px = player.getPosition().x;
-        if (px < 0) player.setPosition(0, player.getPosition().y);
-        if (px + 36 > W) player.setPosition(W - 36.f, player.getPosition().y);
+            sf::Keyboard::isKeyPressed(sf::Keyboard::D))
+            playerX += PLAYER_SPEED * dt;
+        playerX = std::clamp(playerX, 0.f, float(W) - 24.f);
 
-        // Cannon position
-        cannon.setPosition(player.getPosition().x + 15.f,
-                           player.getPosition().y - 10.f);
-
-        // Shoot
+        // ── shoot ─────────────────────────────────────────────
+        shootCooldown -= dt;
         if ((sf::Keyboard::isKeyPressed(sf::Keyboard::Space) ||
              sf::Keyboard::isKeyPressed(sf::Keyboard::Up)) &&
             shootCooldown <= 0.f) {
-            float bx = player.getPosition().x + 16.5f;
-            float by = player.getPosition().y;
-            bullets.push_back(Bullet(bx, by, true));
-            shootCooldown = 0.35f;
+            bullets.push_back({playerX + 11.f, GROUND_Y - 30.f, true});
+            shootCooldown = SHOOT_COOLDOWN;
         }
 
-        // Move bullets
+        // ── move bullets ─────────────────────────────────────
         for (auto &b : bullets) {
-            float dir = b.friendly ? -1.f : 1.f;
-            float spd = b.friendly ? BULLET_SPEED : ALIEN_BULLET_SPEED;
-            b.shape.move(0, dir * spd * dt);
-            if (b.shape.getPosition().y < 0 || b.shape.getPosition().y > H)
-                b.active = false;
+            b.y += (b.friendly ? -BULLET_SPEED : ABUL_SPEED) * dt;
+            if (b.y < HUD_H || b.y > H) b.active = false;
         }
 
-        // Alien movement
-        float minX = W, maxX = 0, maxY = 0;
+        // ── move aliens ───────────────────────────────────────
+        float minX = W, maxX = 0;
         for (auto &a : aliens) {
             if (!a.alive) continue;
-            auto pos = a.shape.getPosition();
-            minX = std::min(minX, pos.x);
-            maxX = std::max(maxX, pos.x + 28.f);
-            maxY = std::max(maxY, pos.y + 20.f);
+            minX = std::min(minX, a.x);
+            maxX = std::max(maxX, a.x + 26.f);
         }
-        bool drop = false;
-        if (maxX >= W - 10 && alienDir > 0) drop = true;
-        if (minX <= 10 && alienDir < 0) drop = true;
+        bool drop = (alienDir > 0 && maxX >= W - 10) ||
+                    (alienDir < 0 && minX <= 10);
         if (drop) {
             alienDir = -alienDir;
-            for (auto &a : aliens) if (a.alive) a.shape.move(0, ALIEN_DROP);
+            for (auto &a : aliens)
+                if (a.alive) a.y += ALIEN_DROP;
         }
         for (auto &a : aliens) {
             if (!a.alive) continue;
-            a.shape.move(alienDir * alienSpeed * dt, 0);
+            a.x += alienDir * alienSpeed * dt;
             a.animTimer += dt;
-            if (a.animTimer > 0.5f) { a.animTimer = 0; a.animFrame ^= 1; }
+            if (a.animTimer > 0.45f) { a.animTimer = 0; a.animFrame ^= 1; }
         }
 
-        // Alien reaches player row → game over
-        if (maxY >= player.getPosition().y - 5.f) { endGame(false); return; }
+        // ── alien invasion (reached ground) ──────────────────
+        for (auto &a : aliens)
+            if (a.alive && a.y + 20.f >= GROUND_Y - 4.f) {
+                flash.trigger(sf::Color(255,60,60,120), 0.5f);
+                endGame(false); return;
+            }
 
-        // Alien shooting
+        // ── alien shooting ────────────────────────────────────
         alienShootTimer += dt;
         if (alienShootTimer >= alienShootInterval) {
-            alienShootTimer = 0;
-            std::vector<Alien *> alive;
-            for (auto &a : aliens) if (a.alive) alive.push_back(&a);
-            if (!alive.empty()) {
-                Alien *shooter = alive[rand() % alive.size()];
-                auto pos = shooter->shape.getPosition();
-                bullets.push_back(Bullet(pos.x + 12.f, pos.y + 20.f, false));
+            alienShootTimer = 0.f;
+            // pick a random front-line alien (lowest in each column)
+            std::vector<Alien *> front;
+            for (int c = 0; c < ALIEN_COLS; c++) {
+                Alien *best = nullptr;
+                for (auto &a : aliens)
+                    if (a.alive) {
+                        int col = int((a.x - 52.f + 4.f) / 72.f);
+                        if (col == c)
+                            if (!best || a.y > best->y) best = &a;
+                    }
+                if (best) front.push_back(best);
+            }
+            if (!front.empty()) {
+                Alien *sh = front[std::rand() % front.size()];
+                bullets.push_back({sh->x + 13.f, sh->y + 20.f, false});
             }
         }
 
-        // UFO
-        ufo.timer -= dt;
-        if (ufo.timer <= 0 && !ufo.active) {
+        // ── UFO ───────────────────────────────────────────────
+        ufo.respawnTimer -= dt;
+        if (!ufo.active && ufo.respawnTimer <= 0.f) {
             ufo.active = true;
-            ufo.body.setPosition(-50.f, 24.f);
-            ufo.timer = randf(8.f, 18.f);
+            ufo.x = -50.f;
+            ufo.y = HUD_H + 12.f;
+            ufo.respawnTimer = randf(10.f, 22.f);
         }
         if (ufo.active) {
-            ufo.body.move(ufo.speed * dt, 0);
-            if (ufo.body.getPosition().x > W + 60) ufo.active = false;
+            ufo.x += ufo.speed * dt;
+            if (ufo.x > W + 60.f) ufo.active = false;
         }
 
-        // Collision: player bullets vs aliens
+        // ── collisions ────────────────────────────────────────
+        auto rectHit = [](float ax,float ay,float aw,float ah,
+                           float bx,float by,float bw,float bh){
+            return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+        };
+
+        // player bullets vs aliens
         for (auto &b : bullets) {
             if (!b.friendly || !b.active) continue;
-            sf::FloatRect br = b.shape.getGlobalBounds();
             for (auto &a : aliens) {
                 if (!a.alive) continue;
-                if (br.intersects(a.shape.getGlobalBounds())) {
-                    a.alive = false;
-                    b.active = false;
-                    int pts = a.type == 0 ? 30 : a.type == 1 ? 20 : 10;
+                if (rectHit(b.x, b.y, 3, 12, a.x, a.y, 26, 20)) {
+                    a.alive = false; b.active = false;
+                    int pts = A_PTS[a.type];
                     score += pts;
-                    spawnParticles(a.shape.getPosition().x + 14,
-                                   a.shape.getPosition().y + 10,
-                                   a.shape.getFillColor(), 8);
+                    if (score > hiScore) hiScore = score;
+                    spawnBurst(a.x+13, a.y+10, C_A[a.type], 10);
+                    flash.trigger(sf::Color(255,255,255,18), 0.08f);
                     break;
                 }
             }
         }
 
-        // Collision: player bullets vs UFO
+        // player bullets vs UFO
         if (ufo.active) {
             for (auto &b : bullets) {
                 if (!b.friendly || !b.active) continue;
-                if (b.shape.getGlobalBounds().intersects(ufo.body.getGlobalBounds())) {
-                    b.active = false;
-                    ufo.active = false;
-                    score += 150;
-                    spawnParticles(ufo.body.getPosition().x + 22, ufo.body.getPosition().y + 9,
-                                   sf::Color(220, 60, 60), 12);
+                if (rectHit(b.x, b.y, 3, 12, ufo.x, ufo.y, 42.f, 18.f)) {
+                    b.active = false; ufo.active = false;
+                    int pts = 50 * (1 + std::rand() % 6);  // 50-300
+                    score += pts;
+                    if (score > hiScore) hiScore = score;
+                    spawnBurst(ufo.x+21, ufo.y+9, C_UFO, 16);
+                    flash.trigger(sf::Color(255,80,80,60), 0.15f);
                 }
             }
         }
 
-        // Collision: bullets vs shields
+        // bullets vs shields
         for (auto &b : bullets) {
             if (!b.active) continue;
-            sf::FloatRect br = b.shape.getGlobalBounds();
-            for (auto &sc : shieldCells) {
-                if (!sc.alive) continue;
-                if (br.intersects(sc.shape.getGlobalBounds())) {
-                    sc.alive = false;
+            for (auto &sc : shields) {
+                if (sc.hp <= 0) continue;
+                if (rectHit(b.x, b.y, 3, 8, sc.x, sc.y, 8, 8)) {
+                    sc.hp--;
                     b.active = false;
                     break;
                 }
             }
         }
 
-        // Collision: alien bullets vs player
-        for (auto &b : bullets) {
-            if (b.friendly || !b.active) continue;
-            if (b.shape.getGlobalBounds().intersects(player.getGlobalBounds())) {
-                b.active = false;
-                lives--;
-                spawnParticles(player.getPosition().x + 18,
-                               player.getPosition().y + 12,
-                               sf::Color(80, 180, 255), 10);
-                if (lives <= 0) { endGame(false); return; }
-                player.setPosition(W / 2.f - 18.f, H - 60.f);
+        // alien bullets vs player
+        invincTimer -= dt;
+        if (invincTimer <= 0.f) {
+            for (auto &b : bullets) {
+                if (b.friendly || !b.active) continue;
+                float py = GROUND_Y - 21.f;
+                if (rectHit(b.x, b.y, 3, 8, playerX, py, 24.f, 21.f)) {
+                    b.active = false;
+                    lives--;
+                    invincTimer = 1.8f;
+                    spawnBurst(playerX+12, py+10, C_PLAYER, 14);
+                    flash.trigger(sf::Color(255,60,60,90), 0.3f);
+                    if (lives <= 0) { endGame(false); return; }
+                    playerX = W / 2.f - 12.f;
+                }
             }
         }
 
-        // Clean up dead bullets
+        // ── cleanup ───────────────────────────────────────────
         bullets.erase(std::remove_if(bullets.begin(), bullets.end(),
-                                     [](const Bullet &b){ return !b.active; }),
-                      bullets.end());
+            [](const Bullet &b){ return !b.active; }), bullets.end());
 
-        // Particles
+        updateParticles(dt);
+
+        // ── flash timer ───────────────────────────────────────
+        if (flash.life > 0.f) flash.life -= dt;
+
+        // ── wave cleared ─────────────────────────────────────
+        bool anyAlive = std::any_of(aliens.begin(), aliens.end(),
+                                    [](const Alien &a){ return a.alive; });
+        if (!anyAlive && !waveCleared) {
+            waveCleared = true;
+            waveClearTimer = 1.4f;
+            spawnBurst(W/2.f, H/2.f, sf::Color(80,255,160), 30);
+            flash.trigger(sf::Color(80,255,160,40), 0.5f);
+        }
+        if (waveCleared) {
+            waveClearTimer -= dt;
+            if (waveClearTimer <= 0.f) {
+                level++;
+                initLevel();
+            }
+        }
+    }
+
+    // ── particles ─────────────────────────────────────────────
+    void spawnBurst(float x, float y, sf::Color c, int n) {
+        for (int i = 0; i < n; i++) {
+            float ang = randf(0, 6.28f);
+            float spd = randf(40.f, 160.f);
+            particles.push_back({x, y,
+                std::cos(ang)*spd, std::sin(ang)*spd,
+                randf(0.4f, 1.0f), 1.0f, c});
+        }
+    }
+    void updateParticles(float dt) {
         for (auto &p : particles) {
-            p.shape.move(p.vel);
-            p.vel.y += 0.15f;
+            p.x  += p.vx * dt;
+            p.y  += p.vy * dt;
+            p.vy += 90.f * dt;   // gravity
             p.life -= dt;
         }
         particles.erase(std::remove_if(particles.begin(), particles.end(),
-                                       [](const Particle &p){ return p.life <= 0; }),
-                        particles.end());
+            [](const Particle &p){ return p.life <= 0; }), particles.end());
+    }
 
-        // All aliens dead → next level
-        if (std::all_of(aliens.begin(), aliens.end(), [](const Alien &a){ return !a.alive; })) {
-            level++;
-            initLevel();
+    // ── scrolling starfield ───────────────────────────────────
+    void scrollStars(float dt) {
+        for (auto &s : stars) {
+            s.pos.y += s.speed * dt;
+            if (s.pos.y > H) { s.pos.y = HUD_H; s.pos.x = randf(0, W); }
         }
     }
 
-    // ── Helpers ────────────────────────────────────────────
-    void spawnParticles(float x, float y, sf::Color col, int n) {
-        for (int i = 0; i < n; i++) {
-            Particle p;
-            p.shape.setRadius(2.f);
-            p.shape.setFillColor(col);
-            p.shape.setPosition(x, y);
-            p.vel = {randf(-2.5f, 2.5f), randf(-4.f, 0.5f)};
-            p.life = randf(0.4f, 0.9f);
-            particles.push_back(p);
-        }
-    }
+    // ── game end ──────────────────────────────────────────────
+    void endGame(bool /*win*/) { state = GAME_OVER; }
 
-    void endGame(bool win) {
-        state = win ? WIN : GAME_OVER;
-    }
-
-    // ── Render ─────────────────────────────────────────────
-    void setTextCentered(sf::Text &t, const std::string &s, float y) {
+    // ── text centering helper ─────────────────────────────────
+    void drawCenteredText(sf::Text &t, const std::string &s, float y,
+                          sf::Color col = sf::Color::White) {
         t.setString(s);
-        sf::FloatRect r = t.getLocalBounds();
-        t.setPosition((W - r.width) / 2.f - r.left, y);
+        t.setFillColor(col);
+        float tw = t.getLocalBounds().width;
+        t.setPosition((W - tw) / 2.f, y);
+        window.draw(t);
     }
 
+    // ── RENDER ────────────────────────────────────────────────
     void render() {
-        window.clear(sf::Color(5, 5, 15));
+        window.clear(C_BG);
 
-        if (state == PLAYING) {
-            // Shields
-            for (auto &sc : shieldCells)
-                if (sc.alive) window.draw(sc.shape);
+        // ── starfield ─────────────────────────────────────────
+        sf::CircleShape star(1.f);
+        for (auto &s : stars) {
+            uint8_t b = uint8_t(s.brightness);
+            star.setFillColor({b, b, b});
+            star.setPosition(s.pos);
+            window.draw(star);
+        }
 
-            // Aliens (simple pixel-art style using rectangles)
-            for (auto &a : aliens) {
-                if (!a.alive) continue;
-                window.draw(a.shape);
-                // Simple "legs" animation
-                sf::RectangleShape leg({5.f, 6.f});
-                leg.setFillColor(a.shape.getFillColor());
-                auto pos = a.shape.getPosition();
-                float off = a.animFrame ? 4.f : 0.f;
-                leg.setPosition(pos.x + off,       pos.y + 20.f);
-                window.draw(leg);
-                leg.setPosition(pos.x + 20.f - off, pos.y + 20.f);
-                window.draw(leg);
+        // ── screen flash overlay ──────────────────────────────
+        if (flash.life > 0.f) {
+            sf::RectangleShape overlay({float(W), float(H)});
+            sf::Color fc = flash.col;
+            fc.a = uint8_t(fc.a * (flash.life / 0.5f));
+            overlay.setFillColor(fc);
+            window.draw(overlay);
+        }
+
+        // ── HUD bar ───────────────────────────────────────────
+        {
+            sf::RectangleShape bar({float(W), HUD_H - 4.f});
+            bar.setFillColor({10, 10, 28});
+            window.draw(bar);
+            sf::RectangleShape line({float(W), 1.f});
+            line.setPosition(0, HUD_H - 4.f);
+            line.setFillColor({40, 60, 100});
+            window.draw(line);
+        }
+
+        if (fontLoaded) {
+            tScore.setString("SCORE " + fmt(score));
+            tScore.setPosition(14, 10);
+            window.draw(tScore);
+
+            tHi.setString("BEST " + fmt(hiScore));
+            tHi.setPosition(W/2.f - tHi.getLocalBounds().width/2.f - tHi.getLocalBounds().left, 10);
+            window.draw(tHi);
+
+            tLevel.setString("LV " + fmt(level));
+            tLevel.setPosition(W - 160.f, 10);
+            window.draw(tLevel);
+
+            // life icons
+            for (int i = 0; i < lives; i++)
+                drawPlayer(window, W - 46.f - i * 26.f, 9.f);
+        }
+
+        // ── ground line ───────────────────────────────────────
+        {
+            sf::RectangleShape g({float(W), 2.f});
+            g.setPosition(0, GROUND_Y);
+            g.setFillColor(C_GROUND);
+            window.draw(g);
+        }
+
+        if (state == PLAYING || state == GAME_OVER) {
+
+            // ── shields ───────────────────────────────────────
+            for (auto &sc : shields) {
+                if (sc.hp <= 0) continue;
+                uint8_t bright = uint8_t(50 + sc.hp * 55);
+                sf::RectangleShape cell({7.f, 7.f});
+                cell.setFillColor({0, bright, 0});
+                cell.setPosition(sc.x, sc.y);
+                window.draw(cell);
             }
 
-            // UFO
-            if (ufo.active) window.draw(ufo.body);
+            // ── aliens ────────────────────────────────────────
+            for (auto &a : aliens) {
+                if (!a.alive) continue;
+                sf::Color col = C_A[a.type];
+                // blink if invincible (reuse invincTimer for alien flash – simple)
+                drawAlienSprite(window, a.x, a.y, a.type, a.animFrame, col);
+            }
 
-            // Player
-            window.draw(player);
-            window.draw(cannon);
+            // ── UFO ───────────────────────────────────────────
+            if (ufo.active) drawUFO(window, ufo.x, ufo.y);
 
-            // Bullets
-            for (auto &b : bullets) window.draw(b.shape);
+            // ── player (blink when invincible) ────────────────
+            bool showPlayer = invincTimer <= 0.f ||
+                              int(invincTimer * 10) % 2 == 0;
+            if (showPlayer)
+                drawPlayer(window, playerX, GROUND_Y - 21.f);
 
-            // Particles
-            for (auto &p : particles) window.draw(p.shape);
+            // ── bullets ───────────────────────────────────────
+            sf::RectangleShape bshape({3.f, 12.f});
+            for (auto &b : bullets) {
+                if (b.friendly) {
+                    bshape.setSize({3.f, 12.f});
+                    bshape.setFillColor(C_BULLET);
+                } else {
+                    bshape.setSize({3.f, 9.f});
+                    bshape.setFillColor(C_ABUL);
+                }
+                bshape.setPosition(b.x, b.y);
+                window.draw(bshape);
+            }
 
-            // Ground line
-            sf::RectangleShape ground({(float)W, 1.f});
-            ground.setPosition(0, H - 40.f);
-            ground.setFillColor(sf::Color(60, 180, 60));
-            window.draw(ground);
+            // ── particles ─────────────────────────────────────
+            sf::CircleShape dot(2.f);
+            for (auto &p : particles) {
+                sf::Color pc = p.col;
+                pc.a = uint8_t(255 * (p.life / p.maxLife));
+                dot.setFillColor(pc);
+                dot.setPosition(p.x - 2, p.y - 2);
+                window.draw(dot);
+            }
 
-            // HUD
-            scoreText.setString("Score: " + std::to_string(score));
-            scoreText.setPosition(10, 8);
-            window.draw(scoreText);
-
-            levelText.setString("Level: " + std::to_string(level));
-            levelText.setPosition(W / 2.f - 40.f, 8.f);
-            window.draw(levelText);
-
-            livesText.setString("Lives: " + std::to_string(lives));
-            livesText.setPosition(W - 120.f, 8.f);
-            window.draw(livesText);
+            // ── wave cleared banner ───────────────────────────
+            if (waveCleared && fontLoaded) {
+                drawCenteredText(tCenter, "WAVE CLEARED!",
+                                 H/2.f - 24.f, sf::Color(80,255,160));
+                drawCenteredText(tSub, "Level " + fmt(level+1) + " incoming...",
+                                 H/2.f + 26.f, sf::Color(180,255,200));
+            }
         }
 
-        // Overlay screens
-        if (state == MENU) {
-            centerText.setFillColor(sf::Color(100, 200, 255));
-            setTextCentered(centerText, "SPACE INVADERS", H / 2.f - 60.f);
-            window.draw(centerText);
-            subText.setString("Press ENTER to start");
-            sf::FloatRect r = subText.getLocalBounds();
-            subText.setPosition((W - r.width) / 2.f, H / 2.f + 20.f);
-            window.draw(subText);
-            subText.setString("Arrows / A-D = Move   |   Space = Fire");
-            r = subText.getLocalBounds();
-            subText.setPosition((W - r.width) / 2.f, H / 2.f + 50.f);
-            window.draw(subText);
+        // ── MENU overlay ──────────────────────────────────────
+        if (state == MENU && fontLoaded) {
+            sf::RectangleShape dim({float(W), float(H)});
+            dim.setFillColor({0,0,0,160});
+            window.draw(dim);
+
+            // draw sample aliens as decoration
+            for (int i = 0; i < 5; i++)
+                drawAlienSprite(window, 180.f + i*90.f, H/2.f - 120.f,
+                                i%3, 0, C_A[i%3]);
+
+            drawCenteredText(tCenter, "SPACE INVADERS", H/2.f - 60.f, C_HUD);
+            drawCenteredText(tSub,  "PRESS  ENTER  OR  SPACE  TO  START",
+                             H/2.f + 10.f, sf::Color(220,220,220));
+            drawCenteredText(tSub2, "LEFT / RIGHT  or  A / D  =  MOVE      SPACE / UP  =  FIRE",
+                             H/2.f + 46.f, sf::Color(130,130,130));
+
+            // scoring legend
+            float lx = W/2.f - 160.f, ly = H/2.f + 90.f;
+            for (int t = 0; t < 3; t++) {
+                drawAlienSprite(window, lx, ly + t*36.f, t, 0, C_A[t]);
+                if (fontLoaded) {
+                    tSub2.setString("= " + fmt(A_PTS[t]) + " pts");
+                    tSub2.setFillColor(C_A[t]);
+                    tSub2.setPosition(lx + 40.f, ly + t*36.f + 4.f);
+                    window.draw(tSub2);
+                }
+            }
+            drawUFO(window, lx - 2.f, ly + 3*36.f);
+            if (fontLoaded) {
+                tSub2.setString("= ??? pts");
+                tSub2.setFillColor(C_UFO);
+                tSub2.setPosition(lx + 40.f, ly + 3*36.f + 4.f);
+                window.draw(tSub2);
+            }
         }
 
-        if (state == GAME_OVER) {
-            centerText.setFillColor(sf::Color(255, 60, 60));
-            setTextCentered(centerText, "GAME OVER", H / 2.f - 60.f);
-            window.draw(centerText);
-            subText.setString("Score: " + std::to_string(score) + "   |   Press ENTER");
-            sf::FloatRect r = subText.getLocalBounds();
-            subText.setPosition((W - r.width) / 2.f, H / 2.f + 20.f);
-            window.draw(subText);
-        }
+        // ── GAME OVER overlay ─────────────────────────────────
+        if (state == GAME_OVER && fontLoaded) {
+            sf::RectangleShape dim({float(W), float(H)});
+            dim.setFillColor({0,0,0,170});
+            window.draw(dim);
 
-        if (state == WIN) {
-            centerText.setFillColor(sf::Color(60, 255, 120));
-            setTextCentered(centerText, "YOU WIN!", H / 2.f - 60.f);
-            window.draw(centerText);
-            subText.setString("Score: " + std::to_string(score) + "   |   Press ENTER");
-            sf::FloatRect r = subText.getLocalBounds();
-            subText.setPosition((W - r.width) / 2.f, H / 2.f + 20.f);
-            window.draw(subText);
+            drawCenteredText(tCenter, "GAME  OVER",
+                             H/2.f - 70.f, sf::Color(255, 60, 60));
+            drawCenteredText(tSub,
+                             "SCORE: " + fmt(score) + "     BEST: " + fmt(hiScore),
+                             H/2.f + 0.f,  sf::Color(200,200,200));
+            drawCenteredText(tSub2,
+                             "PRESS  ENTER  TO  PLAY  AGAIN",
+                             H/2.f + 40.f, sf::Color(140,140,140));
         }
 
         window.display();
     }
 };
 
-// ── Entry point ──────────────────────────────────────────────
+// ── Entry point ───────────────────────────────────────────────
 int main() {
-    SpaceInvaders game;
+    Game game;
     game.run();
     return 0;
 }
