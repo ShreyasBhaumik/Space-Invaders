@@ -1,0 +1,173 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  # ── Linux ────────────────────────────────────────────────────
+  build-linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsfml-dev cmake
+
+      - name: Download font
+        run: |
+          curl -fsSL "https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf" \
+            -o PressStart2P-Regular.ttf || true
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j$(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p pkg/SpaceInvaders_Linux
+          cp build/space_invaders pkg/SpaceInvaders_Linux/
+          cp PressStart2P-Regular.ttf pkg/SpaceInvaders_Linux/ 2>/dev/null || true
+          cp README.md pkg/SpaceInvaders_Linux/ 2>/dev/null || true
+          printf '#!/bin/bash\ncd "$(dirname "$0")"\n./space_invaders\n' \
+            > pkg/SpaceInvaders_Linux/play.sh
+          chmod +x pkg/SpaceInvaders_Linux/play.sh
+          tar -czf SpaceInvaders_Linux.tar.gz -C pkg SpaceInvaders_Linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: SpaceInvaders_Linux.tar.gz
+
+  # ── Windows ──────────────────────────────────────────────────
+  build-windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SFML via vcpkg
+        run: |
+          vcpkg install sfml:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download font
+        shell: pwsh
+        run: |
+          try {
+            Invoke-WebRequest `
+              "https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf" `
+              -OutFile PressStart2P-Regular.ttf
+          } catch { Write-Host "Font download failed, skipping" }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake --build build --config Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "pkg\SpaceInvaders_Windows"
+          New-Item -ItemType Directory -Force -Path $out
+          Copy-Item build\Release\space_invaders.exe $out\
+          # SFML DLLs
+          $bin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+          @("sfml-graphics-2","sfml-window-2","sfml-system-2",
+            "freetype","openal32","ogg","vorbis","vorbisenc","vorbisfile") | ForEach-Object {
+            $f = Join-Path $bin "$_.dll"
+            if (Test-Path $f) { Copy-Item $f $out\ }
+          }
+          if (Test-Path PressStart2P-Regular.ttf) {
+            Copy-Item PressStart2P-Regular.ttf $out\
+          }
+          if (Test-Path README.md) { Copy-Item README.md $out\ }
+          Compress-Archive -Path pkg\SpaceInvaders_Windows -DestinationPath SpaceInvaders_Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: SpaceInvaders_Windows.zip
+
+  # ── macOS ─────────────────────────────────────────────────────
+  build-macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SFML
+        run: brew install sfml cmake
+
+      - name: Download font
+        run: |
+          curl -fsSL "https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf" \
+            -o PressStart2P-Regular.ttf || true
+
+      - name: Build
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix sfml)"
+          cmake --build build --config Release -j$(sysctl -n hw.logicalcpu)
+
+      - name: Package
+        run: |
+          mkdir -p pkg/SpaceInvaders_macOS
+          cp build/space_invaders pkg/SpaceInvaders_macOS/
+          cp PressStart2P-Regular.ttf pkg/SpaceInvaders_macOS/ 2>/dev/null || true
+          cp README.md pkg/SpaceInvaders_macOS/ 2>/dev/null || true
+          printf '#!/bin/bash\ncd "$(dirname "$0")"\n./space_invaders\n' \
+            > pkg/SpaceInvaders_macOS/play.sh
+          chmod +x pkg/SpaceInvaders_macOS/play.sh
+          tar -czf SpaceInvaders_macOS.tar.gz -C pkg SpaceInvaders_macOS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: SpaceInvaders_macOS.tar.gz
+
+  # ── Publish Release ───────────────────────────────────────────
+  release:
+    name: Publish
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with: { name: linux,   path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: windows, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: macos,   path: dist }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Space Invaders ${{ github.ref_name }}"
+          body: |
+            ## 👾 Space Invaders ${{ github.ref_name }}
+
+            | Platform | Download | Instructions |
+            |----------|----------|-------------|
+            | 🪟 Windows | `SpaceInvaders_Windows.zip` | Extract → double-click `space_invaders.exe` |
+            | 🐧 Linux   | `SpaceInvaders_Linux.tar.gz` | Extract → run `./play.sh` |
+            | 🍎 macOS   | `SpaceInvaders_macOS.tar.gz` | Extract → run `./play.sh` |
+
+            ### Controls
+            `← →` or `A D` — Move &nbsp;|&nbsp; `Space` / `↑` — Fire &nbsp;|&nbsp; `Esc` — Quit
+          files: |
+            dist/SpaceInvaders_Linux.tar.gz
+            dist/SpaceInvaders_Windows.zip
+            dist/SpaceInvaders_macOS.tar.gz
